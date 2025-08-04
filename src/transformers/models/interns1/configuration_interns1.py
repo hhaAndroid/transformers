@@ -17,6 +17,131 @@
 from ...configuration_utils import PretrainedConfig
 from ..auto import CONFIG_MAPPING, AutoConfig
 
+from transformers import WhisperConfig
+from typing import Dict, Any, Optional
+from transformers.utils import logging
+from transformers import AutoConfig
+
+# InternTS 
+class InternTimeSeriesEncoderConfig(WhisperConfig):
+
+    model_type = "intern_time_series_encoder"
+
+    def __init__(
+        self,
+        ts_adapt_in_dim: int=256,
+        ts_adapt_out_dim: int=1024,
+        ts_hidden_dim: int=1024,
+        ts_cnn_channels: list[int]=[1, 32, 64, 128, 128],      
+        ts_cnn_kernel_sizes: list[int]=[3, 5, 5, 5],   
+        ts_cnn_strides: list[int]=[2, 4, 4, 5],               
+        ts_cnn_paddings: list[int]=[1, 2, 2, 2],       
+        ts_concat_subsampling_in_channels: int=128,       
+        ts_concat_subsampling_concat_size: int=2,
+        use_flash_attn: bool=False,           
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+        self.ts_cnn_channels = ts_cnn_channels
+        self.ts_cnn_kernel_sizes = ts_cnn_kernel_sizes
+        self.ts_cnn_strides = ts_cnn_strides
+        self.ts_cnn_paddings = ts_cnn_paddings
+        self.ts_concat_subsampling_in_channels = ts_concat_subsampling_in_channels
+        self.ts_concat_subsampling_concat_size = ts_concat_subsampling_concat_size
+
+        self.ts_adapt_in_dim = ts_adapt_in_dim
+        self.ts_adapt_out_dim = ts_adapt_out_dim
+
+        self.ts_hidden_dim = ts_hidden_dim
+        self.use_flash_attn = use_flash_attn
+
+        assert self.ts_adapt_out_dim == self.ts_hidden_dim, "ts_adapt_out_dim should be equal to ts_hidden_dim"
+        assert self.ts_concat_subsampling_in_channels == self.ts_cnn_channels[-1], "ts_concat_subsampling_in_channels should be equal to the out_channel of the last cnn layer"
+
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> 'PretrainedConfig':
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+
+        if 'ts_encoder_config' in config_dict:
+            config_dict = config_dict['ts_encoder_config']
+
+        if 'model_type' in config_dict and hasattr(cls, 'model_type') and config_dict['model_type'] != cls.model_type:
+            logger.warning(
+                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
+                f'{cls.model_type}. This is not supported for all configurations of models and can yield errors.'
+            )
+
+        return cls.from_dict(config_dict, **kwargs)
+
+class InternTSChatConfig(PretrainedConfig):
+    model_type = 'interts_chat'
+    is_composition = True
+
+    def __init__(
+        self,
+        llm_model_path: Optional[str]=None,
+        ts_model_path: Optional[str]=None,
+        use_backbone_lora=0,
+        use_llm_lora=0,
+        select_layer=-1,
+        template="internts",
+        adapter_type='mlp',
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.llm_model_path = llm_model_path
+        self.ts_model_path = ts_model_path
+
+        if ts_model_path is None:
+            ts_config = {'architectures': ['InternTimeSeriesModel']}
+            self.ts_config = InternTimeSeriesEncoderConfig(**ts_config)
+            logger.info('ts_config is None. Initializing the InternTimeSeriesConfig with default values.')
+        else:
+            self.ts_config = InternTimeSeriesEncoderConfig.from_pretrained(self.ts_model_path)
+
+        if llm_model_path is None:
+            llm_config = {'architectures': ['Qwen2ForCausalLM']}
+            from transformers import Qwen2Config
+            self.llm_config = Qwen2Config(**llm_config)
+            logger.info('llm_config is None. Initializing the LlamaConfig config with default values (`QWen2Config`).')
+        else:
+            self.llm_config = AutoConfig.from_pretrained(self.llm_model_path)        
+
+        self.use_backbone_lora = use_backbone_lora
+        self.use_llm_lora = use_llm_lora
+        self.select_layer = select_layer
+        self.template = template
+        self.tie_word_embeddings = self.llm_config.tie_word_embeddings 
+        self.adapter_type = adapter_type
+        logger.info(f'time_series_select_layer: {self.select_layer}')
+        logger.info(f'time_series_model_path: {self.ts_model_path}')
+        logger.info(f'llm_model_path: {self.llm_model_path}')
+        logger.info(f'llm_model_architecture: {self.llm_config.architectures[0]}')
+        logger.info(f'ts_model_architecture: {self.ts_config.architectures[0]}')
+
+
+    def to_dict(self):
+        """
+        Serializes this instance to a Python dictionary. Override the default [`~PretrainedConfig.to_dict`].
+
+        Returns:
+            `Dict[str, any]`: Dictionary of all the attributes that make up this configuration instance,
+        """
+        output = {
+            'ts_model_path': self.ts_model_path,
+            'llm_model_path': self.llm_model_path,
+            'model_type': self.__class__.model_type,
+            'use_backbone_lora': self.use_backbone_lora,
+            'use_llm_lora': self.use_llm_lora,
+            'select_layer': self.select_layer,
+            'adapter_type': self.adapter_type,
+            'template': self.template
+        }
+
+        return output
 
 class InternS1VisionConfig(PretrainedConfig):
     r"""
@@ -188,13 +313,16 @@ class InternS1Config(PretrainedConfig):
     ```"""
 
     model_type = "interns1"
-    sub_configs = {"text_config": AutoConfig, "vision_config": InternS1VisionConfig}
+    sub_configs = {"text_config": AutoConfig, "vision_config": InternS1VisionConfig, "ts_config": InternTimeSeriesEncoderConfig}
 
     def __init__(
         self,
         vision_config=None,
         text_config=None,
+        ts_config=None,
         image_token_id=151667,
+        ts_context_token_id=151668,
+        ts_select_layer=-1,
         image_seq_length=256,
         downsample_ratio=0.5,
         projector_hidden_act="gelu",
@@ -203,6 +331,8 @@ class InternS1Config(PretrainedConfig):
         **kwargs,
     ):
         self.image_token_id = image_token_id
+        self.ts_context_token_id = ts_context_token_id
+        self.ts_select_layer = ts_select_layer
         self.image_seq_length = image_seq_length
         self.downsample_ratio = downsample_ratio
         self.projector_hidden_act = projector_hidden_act
@@ -222,9 +352,16 @@ class InternS1Config(PretrainedConfig):
         elif text_config is None:
             text_config = CONFIG_MAPPING["qwen3_moe"]()
 
+        if isinstance(ts_config, dict):
+            ts_config = InternTimeSeriesEncoderConfig(**ts_config)
+        elif isinstance(ts_config, InternTimeSeriesEncoderConfig):
+            self.ts_config = ts_config
+        elif ts_config is None:
+            self.ts_config = InternTimeSeriesEncoderConfig()
+
         self.text_config = text_config
 
         super().__init__(**kwargs)
 
 
-__all__ = ["InternS1VisionConfig", "InternS1Config"]
+__all__ = ["InternS1VisionConfig", "InternS1Config", "InternTimeSeriesEncoderConfig", "InternTSChatConfig"]
